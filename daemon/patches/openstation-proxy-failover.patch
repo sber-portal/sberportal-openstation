@@ -1,5 +1,5 @@
 diff --git a/daemon/src/assistant/assistant_manager.cpp b/daemon/src/assistant/assistant_manager.cpp
-index b61b19d..cbd767b 100644
+index b61b19d..f2b8605 100644
 --- a/daemon/src/assistant/assistant_manager.cpp
 +++ b/daemon/src/assistant/assistant_manager.cpp
 @@ -252,8 +252,12 @@ void AssistantManager::update_config(const AssistantConfig& cfg) {
@@ -17,7 +17,7 @@ index b61b19d..cbd767b 100644
          }
          if (cfg.google_search != cfg_.google_search || cfg.gemini_api_key != cfg_.gemini_api_key || !cfg.google_search) {
              search_quota_unsupported_.store(false);
-@@ -1236,10 +1240,35 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1236,10 +1240,44 @@ void AssistantManager::session_worker(uint64_t sid,
      };
  
      const bool ext_thinking = contains_ci(cfg_snap.gemini_model, "extended-thinking");
@@ -31,6 +31,15 @@ index b61b19d..cbd767b 100644
 +    }
 +    if (proxy_hosts.empty() && !cfg_snap.gemini_proxy_host.empty()) {
 +        proxy_hosts.push_back(cfg_snap.gemini_proxy_host);
++    }
++    if (!proxy_hosts.empty()) {
++        std::lock_guard<std::mutex> lk(preferred_host_mu_);
++        if (!preferred_proxy_host_.empty()) {
++            auto it = std::find(proxy_hosts.begin(), proxy_hosts.end(), preferred_proxy_host_);
++            if (it != proxy_hosts.end()) {
++                std::rotate(proxy_hosts.begin(), it, it + 1);
++            }
++        }
 +    }
 +    std::vector<std::string> route_hosts;
 +    if (use_proxy_host_.load() && !proxy_hosts.empty()) {
@@ -56,7 +65,7 @@ index b61b19d..cbd767b 100644
      bool retried_search = false;
  
      bool setup_complete = false;
-@@ -1345,19 +1374,17 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1345,19 +1383,17 @@ void AssistantManager::session_worker(uint64_t sid,
          AssistantConfig eff_cfg = cfg_snap;
          eff_cfg.google_search = cur_google_search;
          const std::string setup_json_str = build_setup_json(eff_cfg).dump(-1);
@@ -82,7 +91,7 @@ index b61b19d..cbd767b 100644
                  continue;
              }
              set_error("Подключение к Gemini: " + err, src != TriggerSource::Text);
-@@ -1368,11 +1395,11 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1368,11 +1404,11 @@ void AssistantManager::session_worker(uint64_t sid,
          // Send BidiGenerateContentSetup
          if (!ws.send_text(setup_json_str)) {
              ws.close();
@@ -99,7 +108,7 @@ index b61b19d..cbd767b 100644
                  continue;
              }
              if (!session_abort_.load() && running_.load()) {
-@@ -1409,11 +1436,11 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1409,11 +1445,11 @@ void AssistantManager::session_worker(uint64_t sid,
              if (const auto* e = msg.get("error"); e && e->is_obj()) {
                  std::string em = "Gemini API error";
                  if (const auto* m = e->get("message"); m && m->is_str()) em = m->as_str();
@@ -114,12 +123,16 @@ index b61b19d..cbd767b 100644
                      retry_alternate = true;
                      return false;
                  }
-@@ -1429,12 +1456,12 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1429,12 +1465,16 @@ void AssistantManager::session_worker(uint64_t sid,
  
              if (msg.get("setupComplete")) {
                  setup_complete = true;
 -                use_proxy_host_.store(cur_use_proxy);
 +                use_proxy_host_.store(!route_host().empty());
++                {
++                    std::lock_guard<std::mutex> lk(preferred_host_mu_);
++                    preferred_proxy_host_ = route_host();
++                }
                  had_interaction = (src == TriggerSource::Text) || !pending_voice_greeting.empty();
                  listen_idle_since = std::chrono::steady_clock::now();
                  last_pcm_flush_tp = listen_idle_since;
@@ -129,7 +142,7 @@ index b61b19d..cbd767b 100644
                       cfg_snap.voice_name.c_str());
                  if (!pending_voice_greeting.empty()) {
                      set_state(AssistantState::Thinking);
-@@ -1646,16 +1673,16 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1646,16 +1686,16 @@ void AssistantManager::session_worker(uint64_t sid,
                      LOGI("Assistant", "Gemini WebSocket closed cleanly (code=%u, reason=%s)",
                           frame.close_code, close_reason.c_str());
                      bool can_fallback =
@@ -150,7 +163,7 @@ index b61b19d..cbd767b 100644
                          retry_alternate = true;
                          break;
                      }
-@@ -1681,9 +1708,10 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1681,9 +1721,10 @@ void AssistantManager::session_worker(uint64_t sid,
                      break;
                  }
                  if (rst == WsRecvStatus::Error) {
@@ -164,7 +177,7 @@ index b61b19d..cbd767b 100644
                          retry_alternate = true;
                          break;
                      }
-@@ -1701,10 +1729,10 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1701,10 +1742,10 @@ void AssistantManager::session_worker(uint64_t sid,
  
              if (!setup_complete) {
                  if (now >= setup_deadline_tp) {
@@ -179,7 +192,7 @@ index b61b19d..cbd767b 100644
                          retry_alternate = true;
                      } else {
                          set_error("Таймаут setupComplete от Gemini Live", src != TriggerSource::Text);
-@@ -1813,18 +1841,17 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1813,18 +1854,17 @@ void AssistantManager::session_worker(uint64_t sid,
                  "[Системное событие] Голос ассистента только что переключён на " + cfg_snap.voice_name +
                  ". Подтверди смену голоса пользователю 1–2 короткими фразами этим новым голосом.";
              fatal_error = false;
@@ -202,7 +215,7 @@ index b61b19d..cbd767b 100644
              search_quota_unsupported_.store(true);
              retried_search = true;
              cur_google_search = false;
-@@ -1871,7 +1898,13 @@ json::Value AssistantManager::get_status_json() {
+@@ -1871,7 +1911,13 @@ json::Value AssistantManager::get_status_json() {
      obj["model"] = Value::make_str(c.gemini_model);
      obj["voiceName"] = Value::make_str(c.voice_name);
      obj["proxyHost"] = Value::make_str(c.gemini_proxy_host);
@@ -217,6 +230,20 @@ index b61b19d..cbd767b 100644
      obj["hasApiKey"] = Value::make_bool(!c.gemini_api_key.empty());
      obj["agentMode"] = Value::make_bool(c.agent_mode);
  
+diff --git a/daemon/src/assistant/assistant_manager.hpp b/daemon/src/assistant/assistant_manager.hpp
+index 18320cc..4087ba6 100644
+--- a/daemon/src/assistant/assistant_manager.hpp
++++ b/daemon/src/assistant/assistant_manager.hpp
+@@ -135,6 +135,9 @@ private:
+     std::string last_trigger_reason_;
+     std::atomic<uint64_t> sessions_count_{0};
+     std::atomic<bool> use_proxy_host_{false};
++    // Host that completed the last setup handshake; tried first next session.
++    std::mutex preferred_host_mu_;
++    std::string preferred_proxy_host_;
+     std::atomic<bool> search_quota_unsupported_{false};
+ 
+     // Guard to avoid self-retriggering right after a session ends
 diff --git a/daemon/src/config.cpp b/daemon/src/config.cpp
 index ee183e4..b8eae94 100644
 --- a/daemon/src/config.cpp
