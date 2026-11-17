@@ -24,6 +24,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.Inet4Address
@@ -704,13 +705,21 @@ class SetupWizardActivity : Activity() {
             }
         }
         listOf(
-            "206.223.246.246" to "SNI: ai-pool (KZ)",
-            "ai-pool.comss.one" to "SNI: ai-pool (DNS)",
-            "" to "Прямой (без прокси)"
-        ).forEach { (host, label) ->
+            Triple("SNI: ai-pool (авто)", "206.223.246.246", listOf("206.223.246.246", "ai-pool.comss.one")),
+            Triple("SNI: ai-pool (DNS)", "ai-pool.comss.one", listOf("ai-pool.comss.one")),
+            Triple("Прямой (без прокси)", "", emptyList<String>())
+        ).forEach { (label, host, hosts) ->
             val p = makeChoicePill(label) {
                 curProxyHost = host
-                pushConfigPatch(JSONObject().put("assistant", JSONObject().put("geminiProxyHost", host)), "Прокси обновлён")
+                val arr = JSONArray()
+                hosts.forEach { arr.put(it) }
+                pushConfigPatch(
+                    JSONObject().put(
+                        "assistant",
+                        JSONObject().put("geminiProxyHost", host).put("geminiProxyHosts", arr)
+                    ),
+                    "Прокси обновлён"
+                )
                 syncChoicesHighlight()
             }
             proxyPills[host] = p
