@@ -606,3 +606,135 @@ index a345dd9..b45680c 100644
                  json::Value st = build_status_json();
                  st["ok"] = json::Value::make_bool(ok);
                  std::string out = st.dump(-1);
+diff --git a/daemon/web_ui/index.html b/daemon/web_ui/index.html
+index 98f661b..74220d7 100644
+--- a/daemon/web_ui/index.html
++++ b/daemon/web_ui/index.html
+@@ -39,7 +39,7 @@
+     <nav class="tabs" id="tabNav">
+       <button class="tab active" data-tab="remote">Музыка и Пульт</button>
+       <button class="tab" data-tab="alice">Алиса</button>
+-      <button class="tab" data-tab="sound">Звук и Подсветка</button>
++      <button class="tab" data-tab="sound">Звук</button>
+       <button class="tab" data-tab="system">Система</button>
+     </nav>
+ 
+@@ -225,12 +225,14 @@
+               <button class="btn btn-sm" id="btnRemoteBtToggle" type="button">ᛒ BT-колонка</button>
+             </div>
+ 
+-            <h3>Управление телевизором (HDMI)</h3>
+-            <div class="btn-row">
+-              <button class="btn btn-sm" data-cec="wakeup">Включить ТВ</button>
+-              <button class="btn btn-sm" data-cec="standby">Выключить ТВ</button>
+-              <button class="btn btn-sm" data-cec="volume_up">ТВ Громк +</button>
+-              <button class="btn btn-sm" data-cec="volume_down">ТВ Громк −</button>
++            <div class="unsupported">
++              <h3>Управление телевизором (HDMI)</h3>
++              <div class="btn-row">
++                <button class="btn btn-sm" data-cec="wakeup">Включить ТВ</button>
++                <button class="btn btn-sm" data-cec="standby">Выключить ТВ</button>
++                <button class="btn btn-sm" data-cec="volume_up">ТВ Громк +</button>
++                <button class="btn btn-sm" data-cec="volume_down">ТВ Громк −</button>
++              </div>
+             </div>
+           </div>
+         </div>
+@@ -462,7 +464,7 @@
+                 <button class="seg" data-route="speakers">Динамики</button>
+                 <button class="seg" data-route="headphones">Наушники</button>
+                 <button class="seg" data-route="both">Вместе</button>
+-                <button class="seg" data-route="hdmi">HDMI ТВ</button>
++                <button class="seg unsupported" data-route="hdmi">HDMI ТВ</button>
+               </div>
+             </div>
+ 
+@@ -538,7 +540,7 @@
+           </div>
+ 
+           <div class="stack">
+-            <div class="card">
++            <div class="card unsupported">
+               <h2>Подсветка кольца</h2>
+               <div class="ring-preview-wrap">
+                 <svg viewBox="0 0 220 220" class="ring-svg" id="ringSvg"></svg>
+@@ -602,7 +604,7 @@
+               </details>
+             </div>
+ 
+-            <div class="card">
++            <div class="card unsupported">
+               <h2>Передний экранчик</h2>
+               <div class="row-between" style="gap:10px; margin-bottom:14px; flex-wrap:wrap;">
+                 <div class="status-banner" id="fb5StatusBanner" style="margin:0; flex:1;">Проверка экранчика...</div>
+@@ -779,7 +781,7 @@
+               <details class="adv-details">
+                 <summary>Управление кнопкой, кольцом и сервисом</summary>
+                 <div class="adv-details-body">
+-                  <div class="grid-2-tight">
++                  <div class="grid-2-tight unsupported">
+                     <div class="form-row">
+                       <label>Короткое нажатие кнопки</label>
+                       <select id="actShort">
+@@ -803,7 +805,7 @@
+                       </select>
+                     </div>
+                   </div>
+-                  <div class="grid-2-tight">
++                  <div class="grid-2-tight unsupported">
+                     <div class="form-row toggle-row">
+                       <label>Инвертировать кольцо громкости</label>
+                       <input type="checkbox" id="rotaryInvert" />
+@@ -921,7 +923,7 @@
+         <button class="wiz-step-pill active" data-step="1" type="button">1. Станция и сеть</button>
+         <button class="wiz-step-pill" data-step="2" type="button">2. Алиса</button>
+         <button class="wiz-step-pill" data-step="3" type="button">3. Музыка и Звук</button>
+-        <button class="wiz-step-pill" data-step="4" type="button">4. Подсветка и Кнопки</button>
++        <button class="wiz-step-pill" data-step="4" type="button">4. Экран</button>
+         <button class="wiz-step-pill" data-step="5" type="button">5. Готовность</button>
+       </div>
+ 
+@@ -1041,7 +1043,9 @@
+ 
+         <!-- STEP 4 -->
+         <div class="wiz-pane" id="wizStep4">
+-          <div class="grid-2-tight">
++          <div class="status-banner ok">Экран SberPortal регулирует яркость сам: по датчику освещённости днём и минимальная яркость с одними часами в темноте.</div>
++          <p class="hint" style="margin-top:12px;">Настраивать здесь нечего — автояркость и ночной режим включены всегда. Всё, чего на портале физически нет (LED-кольцо, передний экранчик, энкодер, кнопки Action/Mute, HDMI-CEC), скрыто в пульте.</p>
++          <div class="grid-2-tight unsupported">
+             <div class="form-row">
+               <label>Подсветка кольца</label>
+               <select id="wizRingMode">
+@@ -1058,7 +1062,7 @@
+               <input type="color" id="wizRingColor" value="#00d4ff" />
+             </div>
+           </div>
+-          <div class="grid-2-tight">
++          <div class="grid-2-tight unsupported">
+             <div class="form-row">
+               <label>Верхняя кнопка на корпусе</label>
+               <select id="wizActShort">
+@@ -1073,7 +1077,7 @@
+               <input type="checkbox" id="wizAutoBri" checked />
+             </div>
+           </div>
+-          <div class="btn-row" style="margin-bottom:12px;">
++          <div class="btn-row unsupported" style="margin-bottom:12px;">
+             <button class="btn btn-sm" id="btnWizCecWake" type="button">📺 Включить ТВ (HDMI)</button>
+           </div>
+         </div>
+diff --git a/daemon/web_ui/style.css b/daemon/web_ui/style.css
+index 9727094..749c4a4 100644
+--- a/daemon/web_ui/style.css
++++ b/daemon/web_ui/style.css
+@@ -1225,3 +1225,10 @@ textarea { resize: vertical; line-height: 1.45; }
+   font-weight: 700;
+   color: #f8fafc;
+ }
++
++/* SberPortal: hardware that does not exist on this device (LED ring, front LED
++   matrix, rotary encoder, Action/Mute buttons, HDMI-CEC). The controls stay in
++   the DOM so app.js keeps working, but they are never shown. */
++.unsupported {
++  display: none !important;
++}

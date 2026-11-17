@@ -37,6 +37,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.text.TextUtils
+import android.util.Log
 import android.util.TypedValue
 import android.view.FocusFinder
 import android.view.GestureDetector
@@ -232,6 +233,16 @@ class MainActivity : Activity() {
     private lateinit var ivDialRing: ImageView
     private var dialAnimator: ObjectAnimator? = null
     private lateinit var btnOtaUpdate: TextView
+
+    // Ambient auto brightness + idle "just the clock" screen
+    private var ambient: AmbientDisplay? = null
+    private var ambientNight = false
+    private lateinit var idleClockLayer: FrameLayout
+    private lateinit var idleClockTime: TextView
+    private lateinit var idleClockDate: TextView
+    private lateinit var idleClockHint: TextView
+    private var idleClockVisible = false
+    private var lastInteractionMs = 0L
     @Volatile private var otaLatestJson: JSONObject? = null
     private var otaDialog: AlertDialog? = null
     private var otaDialogStatusTv: TextView? = null
@@ -474,6 +485,11 @@ class MainActivity : Activity() {
         handler.post(clockRunnable)
         handler.post(pollRunnable)
         handler.post(widgetEqTickRunnable)
+
+        startAmbientDisplay()
+        lastInteractionMs = SystemClock.elapsedRealtime()
+        handler.removeCallbacks(idleClockCheckRunnable)
+        handler.postDelayed(idleClockCheckRunnable, 4_000L)
     }
 
     override fun onPause() {
@@ -483,6 +499,9 @@ class MainActivity : Activity() {
         handler.removeCallbacks(clockRunnable)
         handler.removeCallbacks(pollRunnable)
         handler.removeCallbacks(widgetEqTickRunnable)
+        handler.removeCallbacks(idleClockCheckRunnable)
+        exitIdleClock(byUser = false)
+        ambient?.stop()
         vinylAnimator?.pause()
         dialAnimator?.pause()
         super.onPause()
@@ -496,6 +515,8 @@ class MainActivity : Activity() {
         vinylAnimator?.cancel()
         dialAnimator?.cancel()
         handler.removeCallbacks(widgetEqTickRunnable)
+        handler.removeCallbacks(idleClockCheckRunnable)
+        ambient?.stop()
         handler.removeCallbacks(otaDialogPollRunnable)
         try { otaDialog?.dismiss() } catch (_: Throwable) {}
         otaDialog = null
@@ -513,6 +534,9 @@ class MainActivity : Activity() {
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
+        if (ev != null && ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            noteUserActivity()
+        }
         if (ev != null && swipeDetector.onTouchEvent(ev)) {
             return true
         }
@@ -520,6 +544,17 @@ class MainActivity : Activity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (idleClockVisible) {
+            // First key press only wakes the dashboard; it must not also press whatever
+            // control happens to sit under the clock.
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                noteUserActivity()
+            }
+            return true
+        }
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            noteUserActivity()
+        }
         if (event.keyCode == KeyEvent.KEYCODE_HOME) {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 handler.removeCallbacks(okLongPressRunnable)
@@ -1149,6 +1184,64 @@ class MainActivity : Activity() {
             elevation = dp(34).toFloat()
         }
         rootFrame.addView(weatherOverlay)
+
+        // Full-screen idle clock: replaces the whole dashboard after a period without
+        // input (and almost immediately in a dark room), so the portal reads as a clock
+        // instead of a glowing dashboard.
+        idleClockLayer = FrameLayout(this).apply {
+            visibility = View.GONE
+            alpha = 0f
+            isClickable = true
+            isFocusable = false
+            // Flat black on purpose: a very dark gradient bands badly on this panel.
+            setBackgroundColor(Color.BLACK)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            elevation = dp(40).toFloat()
+            setOnClickListener { exitIdleClock(byUser = true) }
+        }
+        val idleClockStack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(40), 0, dp(40), dp(20))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        idleClockTime = TextView(this).apply {
+            text = "--:--"
+            setTextColor(Color.parseColor("#F1F5F9"))
+            textSize = 132f
+            maxLines = 1
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            typeface = Typeface.create("sans-serif-light", Typeface.BOLD)
+            letterSpacing = 0.04f
+        }
+        idleClockDate = TextView(this).apply {
+            text = ""
+            setTextColor(Color.parseColor("#64748B"))
+            textSize = 18f
+            maxLines = 1
+            gravity = Gravity.CENTER
+            setPadding(0, dp(10), 0, 0)
+        }
+        idleClockHint = TextView(this).apply {
+            text = "Скажите «Алиса»"
+            setTextColor(Color.parseColor("#2E3A4B"))
+            textSize = 13f
+            maxLines = 1
+            gravity = Gravity.CENTER
+            setPadding(0, dp(22), 0, 0)
+        }
+        idleClockStack.addView(idleClockTime)
+        idleClockStack.addView(idleClockDate)
+        idleClockStack.addView(idleClockHint)
+        idleClockLayer.addView(idleClockStack)
+        rootFrame.addView(idleClockLayer)
 
         setContentView(rootFrame)
 
@@ -2247,6 +2340,7 @@ class MainActivity : Activity() {
     }
 
     private fun setPage(targetIdx: Int, animate: Boolean) {
+        noteUserActivity()
         val clamped = targetIdx.coerceIn(0, 2)
         val prevPage = currentPage
         currentPage = clamped
@@ -2429,6 +2523,7 @@ class MainActivity : Activity() {
         val uiKey = "$st|$assistantEnabled|$userTxt|$display"
         if (uiKey == lastOrbUiKey) return
         lastOrbUiKey = uiKey
+        if (st != "idle") noteUserActivity()
 
         val accent: Int
         val borderColor: Int
@@ -3093,6 +3188,104 @@ class MainActivity : Activity() {
     }
 
     // -----------------------------------------------------------------------------------------
+    // IDLE CLOCK SCREEN & AMBIENT BRIGHTNESS
+    // -----------------------------------------------------------------------------------------
+    private val idleClockCheckRunnable = object : Runnable {
+        override fun run() {
+            if (canShowIdleClock()) {
+                showIdleClock()
+            } else if (idleClockVisible && !idleClockAllowed()) {
+                exitIdleClock(byUser = false)
+            }
+            handler.postDelayed(this, if (idleClockVisible) 10_000L else 4_000L)
+        }
+    }
+
+    /** In a dark room the dashboard is replaced almost at once; otherwise after a minute. */
+    private fun idleClockDelayMs(): Long = if (ambientNight) 30_000L else 90_000L
+
+    private fun idleClockAllowed(): Boolean =
+        currentPage == 0 && !appsDrawerOpen && !homeCustomOpen && !appContextOpen && !appInfoOpen &&
+            reorderingPkg == null &&
+            LiveOrbState.assistantState == "idle" && !LiveOrbState.musicPlaying &&
+            assistantState == "idle"
+
+    private fun canShowIdleClock(): Boolean {
+        if (idleClockVisible || !::idleClockTime.isInitialized) return false
+        if (!idleClockAllowed()) {
+            lastInteractionMs = SystemClock.elapsedRealtime()
+            return false
+        }
+        return SystemClock.elapsedRealtime() - lastInteractionMs >= idleClockDelayMs()
+    }
+
+    private fun noteUserActivity() {
+        lastInteractionMs = SystemClock.elapsedRealtime()
+        if (idleClockVisible) exitIdleClock(byUser = false)
+    }
+
+    private fun showIdleClock() {
+        if (idleClockVisible || !::idleClockLayer.isInitialized) return
+        Log.i("IdleClock", "showing clock screen (night=$ambientNight lux=${ambient?.lux})")
+        idleClockVisible = true
+        updateIdleClockContent()
+        idleClockLayer.visibility = View.VISIBLE
+        idleClockLayer.animate().alpha(1f).setDuration(420L).start()
+    }
+
+    private fun exitIdleClock(byUser: Boolean) {
+        if (byUser) lastInteractionMs = SystemClock.elapsedRealtime()
+        if (!idleClockVisible) return
+        Log.i("IdleClock", "hiding clock screen (byUser=$byUser)")
+        idleClockVisible = false
+        idleClockLayer.animate().alpha(0f).setDuration(220L).withEndAction {
+            if (!idleClockVisible) idleClockLayer.visibility = View.GONE
+        }.start()
+    }
+
+    private fun updateIdleClockContent() {
+        if (!::idleClockTime.isInitialized) return
+        clockDate.time = System.currentTimeMillis()
+        val tz = TimeZone.getDefault()
+        timeFmt.timeZone = tz
+        shortDateFmt.timeZone = tz
+        idleClockTime.text = timeFmt.format(clockDate)
+        idleClockDate.text = shortDateFmt.format(clockDate).replaceFirstChar { it.uppercase() }
+        applyIdleClockNightStyle()
+    }
+
+    private fun applyIdleClockNightStyle() {
+        if (!::idleClockTime.isInitialized) return
+        val night = ambientNight
+        idleClockTime.setTextColor(Color.parseColor(if (night) "#8A94A6" else "#F1F5F9"))
+        idleClockDate.visibility = if (night) View.GONE else View.VISIBLE
+        idleClockHint.visibility = if (night) View.GONE else View.VISIBLE
+    }
+
+    private fun onAmbientNightChanged(dark: Boolean) {
+        if (ambientNight == dark) return
+        ambientNight = dark
+        applyIdleClockNightStyle()
+        // Coming from a lit room into darkness: collapse to the clock without waiting the
+        // full idle period, but leave a couple of seconds so it is not a jump cut.
+        if (dark) {
+            lastInteractionMs = SystemClock.elapsedRealtime() - idleClockDelayMs() + 2_500L
+            handler.removeCallbacks(idleClockCheckRunnable)
+            handler.postDelayed(idleClockCheckRunnable, 2_500L)
+        }
+    }
+
+    private fun startAmbientDisplay() {
+        if (ambient == null) {
+            ambient = AmbientDisplay(this, window) { dark ->
+                runOnUiThread { onAmbientNightChanged(dark) }
+            }
+        }
+        ambient?.enabled = true
+        ambient?.start()
+    }
+
+    // -----------------------------------------------------------------------------------------
     // CLOCK, NETWORK & DAEMON TELEMETRY
     // -----------------------------------------------------------------------------------------
     private fun updateClock(force: Boolean = false) {
@@ -3169,6 +3362,8 @@ class MainActivity : Activity() {
         } else {
             tvTopWeather.visibility = View.GONE
         }
+
+        if (idleClockVisible) updateIdleClockContent()
     }
 
     private fun detectLocalIp(force: Boolean = false): String {
@@ -3512,6 +3707,7 @@ class MainActivity : Activity() {
     private fun renderMusicSnapshot(snap: YmPlayerSnapshot, forceViews: Boolean = false) {
         latestMusicSnap = snap
         LiveOrbState.musicPlaying = snap.playing
+        if (snap.playing) noteUserActivity()
 
         val tr = snap.currentTrack
         val chipText = if (tr != null) {
