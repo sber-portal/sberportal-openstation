@@ -12,14 +12,44 @@ git checkout 954c906            # v1.5.1, база патча
 git apply /path/to/openstation-proxy-failover.patch
 ```
 
-Патч меняет четыре файла:
+Патч делает две вещи: перебор прокси-хостов для Gemini Live и инструмент
+`kinopoisk_control` для голосового запуска фильмов.
 
 | файл | что делает |
 | --- | --- |
 | `daemon/src/config.hpp` | поле `gemini_proxy_hosts` в `AssistantConfig` |
 | `daemon/src/config.cpp` | разбор/сериализация `assistant.geminiProxyHosts`, нормализация значений |
-| `daemon/src/assistant/assistant_manager.cpp` | упорядоченные маршруты и перебор при сбое |
-| `daemon/src/main.cpp` | `geminiProxyHosts` в теле `POST /api/assistant/test` |
+| `daemon/src/assistant/assistant_manager.cpp` | упорядоченные маршруты и перебор при сбое; объявление инструмента `kinopoisk_control` и правила для промпта |
+| `daemon/src/main.cpp` | `geminiProxyHosts` в теле `POST /api/assistant/test`; реализация `kinopoisk_control` и резолвер названия в ID Кинопоиска |
+
+## Инструмент `kinopoisk_control`
+
+Голосовая команда «включи фильм …» превращается в открытие карточки фильма
+в приложении Кинопоиска (`ru.kinopoisk`). Схема:
+
+1. Gemini вызывает `kinopoisk_control(action="play", title="Дюна")`.
+2. Демон ищет ID Кинопоиска через Wikidata: CirrusSearch по
+   `"<название> haswbstatement:P2603"` (P2603 — Kinopoisk film ID), затем
+   `wbgetclaims&property=P2603` у первого подходящего элемента.
+3. Открывает `am start -a android.intent.action.VIEW -d kp://film/<id>` —
+   приложение показывает карточку с автозапуском трейлера.
+4. Если ID не нашёлся — открывает вкладку поиска `kp://search` и говорит об этом.
+
+Действия инструмента: `play` (по названию), `open` (просто открыть приложение),
+`search` (вкладка поиска), `play_pause` (keyevent 85), `stop` (`am force-stop`).
+
+Почему Wikidata, а не поиск Кинопоиска: `www.kinopoisk.ru/index.php?kp_query=…`
+отдаёт редирект в Яндекс SSO (антибот), а открытый API Кинопоиска требует ключа.
+Wikidata доступна с домашних сетей РФ и не требует регистрации.
+
+Проверено на портале: «Дюна» → `kp://film/409424`, «Ведьмак» → `kp://film/1044004`
+(сериал 2019), «Смешарики» → `kp://film/256124`. Deep link `kp://film/<id>`
+работает и для фильмов, и для сериалов.
+
+Ограничение: сам просмотр требует входа в аккаунт Яндекса в приложении
+(и подписки Плюс для большинства фильмов) — без логина Кинопоиск уводит
+на экран `BouncerActivity`. Голосовая команда открывает карточку и трейлер,
+дальше нужен тап по «Смотреть».
 
 ## Сборка под портал (`armeabi-v7a`)
 

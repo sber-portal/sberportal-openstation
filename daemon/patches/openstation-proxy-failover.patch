@@ -1,5 +1,5 @@
 diff --git a/daemon/src/assistant/assistant_manager.cpp b/daemon/src/assistant/assistant_manager.cpp
-index b61b19d..f2b8605 100644
+index b61b19d..69e91f3 100644
 --- a/daemon/src/assistant/assistant_manager.cpp
 +++ b/daemon/src/assistant/assistant_manager.cpp
 @@ -252,8 +252,12 @@ void AssistantManager::update_config(const AssistantConfig& cfg) {
@@ -17,7 +17,52 @@ index b61b19d..f2b8605 100644
          }
          if (cfg.google_search != cfg_.google_search || cfg.gemini_api_key != cfg_.gemini_api_key || !cfg.google_search) {
              search_quota_unsupported_.store(false);
-@@ -1236,10 +1240,44 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -672,13 +676,19 @@ json::Value AssistantManager::build_setup_json(const AssistantConfig& c) const {
+               "- У тебя ЕСТЬ полный root-доступ ко всей колонке и Android TV: аппаратный звук/эквалайзер (set_volume, set_eq_preset, "
+               "set_audio_route, play_sound, set_mic_mute), LED-кольцо и экран-матрица (set_led_ring, set_led_screen, show_screen_banner), "
+               "таймеры/будильники (manage_timer), HDMI-CEC и пульт ТВ (tv_hdmi_cec, remote_control, type_text), встроенный нативный плеер "
+-              "Яндекс Музыка (music_control), приложения и ссылки (manage_apps), умный дом MQTT/HTTP (mqtt_publish, http_request), "
++              "Яндекс Музыка (music_control), Кинопоиск (kinopoisk_control), приложения и ссылки (manage_apps), умный дом MQTT/HTTP (mqtt_publish, http_request), "
+               "диагностика и ограниченное управление питанием (system_info, device_power).\n"
+               "- Музыка (music_control): на команды «включи музыку», «поставь музыку», «давай музыку», «включи мою волну» (без конкретного названия) "
+               "ВСЕГДА сразу вызывай music_control(action=\"play_my_wave\"). Если назван исполнитель/песня/жанр — вызывай music_control(action=\"play_query\", query=\"...\"); "
+               "если попросили настроение волны («бодрую/весёлую/спокойную/грустную волну») — action=\"play_my_wave\" с mood. "
+               "Для «дальше/следующий» -> next, «назад/предыдущий» -> prev, «лайк/нравится» -> like, «дизлайк/не нравится» -> dislike, "
+               "«мои лайки/избранное» -> play_liked, «пауза/стоп» -> pause/stop, «открой яндекс музыку» -> open.\n"
++              "- Кинопоиск (kinopoisk_control): на «включи/поставь/открой фильм, сериал, мультфильм, кино …», «хочу посмотреть …» "
++              "ВСЕГДА сразу вызывай kinopoisk_control(action=\"play\", title=\"<название как сказал пользователь>\") — инструмент сам найдёт фильм на Кинопоиске "
++              "и откроет его карточку в приложении. Если просят просто открыть Кинопоиск — action=\"open\"; «найди фильм …» — action=\"search\"; "
++              "«пауза/продолжи» во время просмотра — play_pause; «закрой кино» — stop. Не придумывай числовые ID, передавай только название. "
++              "После вызова коротко подтверди: «Открываю <название> на Кинопоиске». Полноценный просмотр требует входа "
++              "в аккаунт Яндекса (и подписки Плюс для большинства фильмов) — если на экране просят войти, коротко скажи об этом.\n"
+               "- Блютуз (bluetooth_control): на команды «включи блютуз», «включить блютуз», «подключи телефон по блютуз», «режим блютуз», «вруби блютуз» "
+               "ВСЕГДА сразу вызывай bluetooth_control(action=\"discoverable\"). Колонка станет видимой на телефоне как OpenStation Max, и пользователь сможет "
+               "транслировать музыку с телефона на Станцию (A2DP Sink). На «выключи блютуз», «отключи блютуз» вызывай bluetooth_control(action=\"disable\").\n"
+@@ -1075,6 +1085,23 @@ json::Value AssistantManager::build_setup_json(const AssistantConfig& c) const {
+             nb));
+     }
+ 
++    {
++        Value p = Value::make_obj();
++        p["action"] = make_enum_prop(
++            "Kinopoisk action: 'play' opens the movie/series card for a spoken title, 'open' just launches the app, "
++            "'search' opens the in-app search tab, 'play_pause' toggles playback, 'stop' closes the player.",
++            {"play", "open", "search", "play_pause", "stop"});
++        p["title"] = make_prop("STRING", "Movie, cartoon or series title in Russian as the user said it (for action='play')");
++        p["film_id"] = make_prop("STRING", "Optional Kinopoisk numeric ID if it is already known; leave empty to let the daemon resolve the title itself");
++        p["kind"] = make_enum_prop("Optional content kind hint", {"film", "series"});
++        decls.push(make_func_decl(
++            "kinopoisk_control",
++            "Open a movie, cartoon or series on Kinopoisk by title: resolves the Kinopoisk ID and opens its card in the app.",
++            std::move(p),
++            {"action"},
++            nb));
++    }
++
+     {
+         Value p = Value::make_obj();
+         p["action"] = make_enum_prop("App management action", {"list", "launch", "close", "open_url"});
+@@ -1236,10 +1263,44 @@ void AssistantManager::session_worker(uint64_t sid,
      };
  
      const bool ext_thinking = contains_ci(cfg_snap.gemini_model, "extended-thinking");
@@ -65,7 +110,7 @@ index b61b19d..f2b8605 100644
      bool retried_search = false;
  
      bool setup_complete = false;
-@@ -1345,19 +1383,17 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1345,19 +1406,17 @@ void AssistantManager::session_worker(uint64_t sid,
          AssistantConfig eff_cfg = cfg_snap;
          eff_cfg.google_search = cur_google_search;
          const std::string setup_json_str = build_setup_json(eff_cfg).dump(-1);
@@ -91,7 +136,7 @@ index b61b19d..f2b8605 100644
                  continue;
              }
              set_error("Подключение к Gemini: " + err, src != TriggerSource::Text);
-@@ -1368,11 +1404,11 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1368,11 +1427,11 @@ void AssistantManager::session_worker(uint64_t sid,
          // Send BidiGenerateContentSetup
          if (!ws.send_text(setup_json_str)) {
              ws.close();
@@ -108,7 +153,7 @@ index b61b19d..f2b8605 100644
                  continue;
              }
              if (!session_abort_.load() && running_.load()) {
-@@ -1409,11 +1445,11 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1409,11 +1468,11 @@ void AssistantManager::session_worker(uint64_t sid,
              if (const auto* e = msg.get("error"); e && e->is_obj()) {
                  std::string em = "Gemini API error";
                  if (const auto* m = e->get("message"); m && m->is_str()) em = m->as_str();
@@ -123,7 +168,7 @@ index b61b19d..f2b8605 100644
                      retry_alternate = true;
                      return false;
                  }
-@@ -1429,12 +1465,16 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1429,12 +1488,16 @@ void AssistantManager::session_worker(uint64_t sid,
  
              if (msg.get("setupComplete")) {
                  setup_complete = true;
@@ -142,7 +187,7 @@ index b61b19d..f2b8605 100644
                       cfg_snap.voice_name.c_str());
                  if (!pending_voice_greeting.empty()) {
                      set_state(AssistantState::Thinking);
-@@ -1646,16 +1686,16 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1646,16 +1709,16 @@ void AssistantManager::session_worker(uint64_t sid,
                      LOGI("Assistant", "Gemini WebSocket closed cleanly (code=%u, reason=%s)",
                           frame.close_code, close_reason.c_str());
                      bool can_fallback =
@@ -163,7 +208,7 @@ index b61b19d..f2b8605 100644
                          retry_alternate = true;
                          break;
                      }
-@@ -1681,9 +1721,10 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1681,9 +1744,10 @@ void AssistantManager::session_worker(uint64_t sid,
                      break;
                  }
                  if (rst == WsRecvStatus::Error) {
@@ -177,7 +222,7 @@ index b61b19d..f2b8605 100644
                          retry_alternate = true;
                          break;
                      }
-@@ -1701,10 +1742,10 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1701,10 +1765,10 @@ void AssistantManager::session_worker(uint64_t sid,
  
              if (!setup_complete) {
                  if (now >= setup_deadline_tp) {
@@ -192,7 +237,7 @@ index b61b19d..f2b8605 100644
                          retry_alternate = true;
                      } else {
                          set_error("Таймаут setupComplete от Gemini Live", src != TriggerSource::Text);
-@@ -1813,18 +1854,17 @@ void AssistantManager::session_worker(uint64_t sid,
+@@ -1813,18 +1877,17 @@ void AssistantManager::session_worker(uint64_t sid,
                  "[Системное событие] Голос ассистента только что переключён на " + cfg_snap.voice_name +
                  ". Подтверди смену голоса пользователю 1–2 короткими фразами этим новым голосом.";
              fatal_error = false;
@@ -215,7 +260,7 @@ index b61b19d..f2b8605 100644
              search_quota_unsupported_.store(true);
              retried_search = true;
              cur_google_search = false;
-@@ -1871,7 +1911,13 @@ json::Value AssistantManager::get_status_json() {
+@@ -1871,7 +1934,13 @@ json::Value AssistantManager::get_status_json() {
      obj["model"] = Value::make_str(c.gemini_model);
      obj["voiceName"] = Value::make_str(c.voice_name);
      obj["proxyHost"] = Value::make_str(c.gemini_proxy_host);
@@ -312,10 +357,103 @@ index 98cd22c..7ffd967 100644
      std::string system_prompt =
          "Ты — девушка, голосовая помощница Алиса на умной колонке Яндекс Станция Макс с открытой прошивкой OpenStation Max (полный root-доступ и живой доступ в интернет). "
 diff --git a/daemon/src/main.cpp b/daemon/src/main.cpp
-index a345dd9..5055aa8 100644
+index a345dd9..b45680c 100644
 --- a/daemon/src/main.cpp
 +++ b/daemon/src/main.cpp
-@@ -1146,6 +1146,10 @@ int main(int argc, char** argv) {
+@@ -972,6 +972,92 @@ void probe_android_stream_music(const std::string& route, bool hp_plugged, int&
+     }
+ }
+ 
++
++// --- Kinopoisk: resolve a spoken title to a Kinopoisk film/series id ---
++// Uses ru.wikipedia (search + page props) and Wikidata P2603 (Kinopoisk film id),
++// both reachable from RU residential networks without API keys.
++
++using namespace openstation;
++
++std::string kp_http_json(const std::string& url) {
++    HttpClientRequest req;
++    req.method = "GET";
++    req.url = url;
++    req.timeout_ms = 6000;
++    req.max_body_bytes = 256 * 1024;
++    req.headers["User-Agent"] = "OpenStation/1.5.1 (SberPortal; kinopoisk deep link)";
++    req.headers["Accept"] = "application/json";
++    const HttpClientResponse r = http_perform(req);
++    if (!r.ok || r.status_code < 200 || r.status_code >= 300) {
++        LOGW("Kinopoisk", "GET %s failed: ok=%d status=%d err=%s",
++             url.c_str(), r.ok ? 1 : 0, r.status_code, r.error.c_str());
++        return std::string();
++    }
++    LOGI("Kinopoisk", "GET %s -> %d bytes", url.c_str(), static_cast<int>(r.body.size()));
++    return r.body;
++}
++
++bool kinopoisk_resolve_title(const std::string& title,
++                             std::string& out_id,
++                             std::string& out_kind,
++                             std::string& out_page) {
++    out_id.clear();
++    out_kind = "film";
++    out_page.clear();
++    if (title.empty()) return false;
++
++    // Wikidata CirrusSearch: only items that actually carry a Kinopoisk film id (P2603).
++    const std::string search_url =
++        "https://www.wikidata.org/w/api.php?action=query&format=json&list=search&srlimit=5&srsearch=" +
++        url_encode(title + " haswbstatement:P2603");
++    json::Value sv;
++    if (!json::Parser::parse(kp_http_json(search_url), sv)) return false;
++    const json::Value* sq = sv.get("query");
++    if (!sq) return false;
++    const json::Value* hits = sq->get("search");
++    if (!hits || hits->type != json::Type::Array || hits->arr_val.empty()) return false;
++
++    for (const auto& h : hits->arr_val) {
++        const json::Value* t = h.get("title");
++        if (!t) continue;
++        const std::string qid = t->as_str();
++        if (qid.empty() || qid[0] != 'Q') continue;
++        const std::string claims_url =
++            "https://www.wikidata.org/w/api.php?action=wbgetclaims&format=json"
++            "&property=P2603&entity=" + url_encode(qid);
++        json::Value cv;
++        if (!json::Parser::parse(kp_http_json(claims_url), cv)) continue;
++        std::string id;
++        if (const json::Value* claims = cv.get("claims")) {
++            if (const json::Value* arr = claims->get("P2603")) {
++                if (arr->type == json::Type::Array && !arr->arr_val.empty()) {
++                    const json::Value& claim = arr->arr_val.front();
++                    if (const json::Value* ms = claim.get("mainsnak")) {
++                        if (const json::Value* dv = ms->get("datavalue")) {
++                            if (const json::Value* val = dv->get("value")) id = val->as_str();
++                        }
++                    }
++                }
++            }
++        }
++        if (id.empty()) continue;
++        out_id = id;
++        out_page = qid;
++        LOGI("Kinopoisk", "resolved '%s' -> %s (id=%s)", title.c_str(), qid.c_str(), out_id.c_str());
++        return true;
++    }
++    LOGW("Kinopoisk", "no P2603 id for '%s'", title.c_str());
++    return false;
++}
++
++bool kinopoisk_open_deep_link(const std::string& kind, const std::string& id) {
++    if (id.empty()) return false;
++    const std::string uri = "kp://" + (kind == "series" ? std::string("series") : std::string("film")) + "/" + id;
++    return spawn_detached({"/system/bin/am", "start",
++                           "-a", "android.intent.action.VIEW",
++                           "-d", uri});
++}
++
+ } // namespace
+ 
+ int main(int argc, char** argv) {
+@@ -1146,6 +1232,10 @@ int main(int argc, char** argv) {
      TimerManager timers;
      WyomingServer wyoming;
      MdnsResponder mdns;
@@ -326,7 +464,7 @@ index a345dd9..5055aa8 100644
      AdbManager adb_mgr;
      MqttClient mqtt;
      OtaManager ota;
-@@ -1517,7 +1521,7 @@ int main(int argc, char** argv) {
+@@ -1517,7 +1607,7 @@ int main(int argc, char** argv) {
          assistant.set_mic_sensitivity(c.audio.mic_sensitivity);
          wyoming.update_config(c.wyoming);
          mdns.update_hostname(c.device_hostname);
@@ -335,7 +473,95 @@ index a345dd9..5055aa8 100644
          mqtt.update_config(c.mqtt);
          ota.update_config(c.ota);
  
-@@ -3449,9 +3453,11 @@ int main(int argc, char** argv) {
+@@ -3217,6 +3307,87 @@ int main(int argc, char** argv) {
+             return res;
+         }
+ 
++        if (name == "kinopoisk_control") {
++            std::string act = args.get("action") ? args.get("action")->as_str("play") : "play";
++            std::string title = args.get("title") ? args.get("title")->as_str() : "";
++            std::string film_id = args.get("film_id") ? args.get("film_id")->as_str() : "";
++            std::string kind = args.get("kind") ? args.get("kind")->as_str() : "";
++            bool id_digits = !film_id.empty();
++            for (unsigned char ch : film_id) {
++                if (!std::isdigit(ch)) { id_digits = false; break; }
++            }
++            if (!id_digits) film_id.clear();
++            if (kind != "series") kind = "film";
++
++            if (act == "open") {
++                bool ok = spawn_detached({"/system/bin/monkey", "-p", "ru.kinopoisk",
++                                          "-c", "android.intent.category.LAUNCHER", "1"});
++                trigger_task_icon_for_app("kinopoisk", "Кинопоиск");
++                res["ok"] = Value::make_bool(ok);
++                res["package"] = Value::make_str("ru.kinopoisk");
++                res["label"] = Value::make_str("Кинопоиск");
++                res["stopSession"] = Value::make_bool(true);
++                return res;
++            }
++
++            if (act == "play_pause" || act == "pause" || act == "resume") {
++                ShellResult sr = run_shell_with_timeout("/system/bin/input keyevent 85", 4, 256);
++                res["ok"] = Value::make_bool(!sr.timed_out);
++                res["action"] = Value::make_str("media_play_pause");
++                return res;
++            }
++
++            if (act == "stop" || act == "close") {
++                run_shell_with_timeout("/system/bin/am force-stop ru.kinopoisk", 5, 256);
++                uinput.send_android_action("home");
++                res["ok"] = Value::make_bool(true);
++                res["action"] = Value::make_str("stopped");
++                res["stopSession"] = Value::make_bool(true);
++                return res;
++            }
++
++            if (act == "search" || act == "play") {
++                std::string resolved_page;
++                std::string resolved_kind = kind;
++                if (film_id.empty() && !title.empty()) {
++                    std::string rk, page;
++                    if (kinopoisk_resolve_title(title, film_id, rk, page)) {
++                        resolved_page = page;
++                        if (!rk.empty()) resolved_kind = rk;
++                    }
++                }
++                if (!film_id.empty()) {
++                    bool ok = kinopoisk_open_deep_link(resolved_kind, film_id);
++                    trigger_task_icon_for_app("kinopoisk", "Кинопоиск");
++                    res["ok"] = Value::make_bool(ok);
++                    res["package"] = Value::make_str("ru.kinopoisk");
++                    res["kinopoiskId"] = Value::make_str(film_id);
++                    res["kind"] = Value::make_str(resolved_kind);
++                    if (!title.empty()) res["title"] = Value::make_str(title);
++                    if (!resolved_page.empty()) res["resolvedFrom"] = Value::make_str(resolved_page);
++                    res["note"] = Value::make_str(
++                        "Opened the Kinopoisk card with trailer; watching the full title needs the user to tap "
++                        "\"Смотреть\" and be signed in to a Yandex account.");
++                    res["stopSession"] = Value::make_bool(true);
++                    return res;
++                }
++                spawn_detached({"/system/bin/am", "start",
++                                "-a", "android.intent.action.VIEW",
++                                "-d", "kp://search"});
++                trigger_task_icon_for_app("kinopoisk", "Кинопоиск");
++                res["ok"] = Value::make_bool(false);
++                res["error"] = Value::make_str("title not resolved; opened Kinopoisk search instead");
++                if (!title.empty()) res["title"] = Value::make_str(title);
++                res["fallback"] = Value::make_str("kp://search");
++                res["stopSession"] = Value::make_bool(true);
++                return res;
++            }
++
++            res["ok"] = Value::make_bool(false);
++            res["error"] = Value::make_str("unknown kinopoisk action");
++            return res;
++        }
++
+         if (name == "manage_apps") {
+             std::string act = args.get("action") ? args.get("action")->as_str("list") : "list";
+             if (act == "list") {
+@@ -3449,9 +3620,11 @@ int main(int argc, char** argv) {
      });
  
      mdns.start(cfg.device_hostname, cfg.web_port, cfg.wyoming.port);
@@ -350,7 +576,7 @@ index a345dd9..5055aa8 100644
  
      mqtt.start(cfg.mqtt, [&](const std::string& topic_suffix, const std::string& payload) {
          DaemonConfig next_c;
-@@ -3979,6 +3985,14 @@ int main(int argc, char** argv) {
+@@ -3979,6 +4152,14 @@ int main(int argc, char** argv) {
                      if (const auto* p = v.get("geminiProxyHost"); p && p->is_str()) {
                          proxy = p->as_str();
                      }
@@ -365,7 +591,7 @@ index a345dd9..5055aa8 100644
                  }
                  json::Value pr = probe_gemini_live_json(key, model, proxy);
                  return HttpResponse::json(pr.dump(-1), 200);
-@@ -4162,12 +4176,12 @@ int main(int argc, char** argv) {
+@@ -4162,12 +4343,12 @@ int main(int argc, char** argv) {
                  }
  
                  if (cfg_dirty) {
