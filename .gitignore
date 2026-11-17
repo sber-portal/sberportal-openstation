@@ -1,0 +1,12 @@
+# Android / Gradle
+launcher/.gradle/
+launcher/app/build/
+launcher/build/
+launcher/local.properties
+*.iml
+.idea/
+
+# Артефакты и бэкапы
+*.bak
+*.idsig
+backup-*/

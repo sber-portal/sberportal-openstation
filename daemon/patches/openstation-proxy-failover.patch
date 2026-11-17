@@ -1,0 +1,355 @@
+diff --git a/daemon/src/assistant/assistant_manager.cpp b/daemon/src/assistant/assistant_manager.cpp
+index b61b19d..cbd767b 100644
+--- a/daemon/src/assistant/assistant_manager.cpp
++++ b/daemon/src/assistant/assistant_manager.cpp
+@@ -252,8 +252,12 @@ void AssistantManager::update_config(const AssistantConfig& cfg) {
+     int sens = 85;
+     {
+         std::lock_guard<std::mutex> lk(cfg_mu_);
+-        if (cfg.gemini_proxy_host != cfg_.gemini_proxy_host) {
+-            use_proxy_host_.store(false);
++        if (cfg.gemini_proxy_host != cfg_.gemini_proxy_host ||
++            cfg.gemini_proxy_hosts != cfg_.gemini_proxy_hosts) {
++            // SberPortal reaches Gemini only through the SNI relay: the direct route is
++            // geo-blocked, so a configured proxy host must be the first attempt instead
++            // of costing an 8 s TLS timeout on every daemon restart.
++            use_proxy_host_.store(!cfg.gemini_proxy_host.empty() || !cfg.gemini_proxy_hosts.empty());
+         }
+         if (cfg.google_search != cfg_.google_search || cfg.gemini_api_key != cfg_.gemini_api_key || !cfg.google_search) {
+             search_quota_unsupported_.store(false);
+@@ -1236,10 +1240,35 @@ void AssistantManager::session_worker(uint64_t sid,
+     };
+ 
+     const bool ext_thinking = contains_ci(cfg_snap.gemini_model, "extended-thinking");
+-    const bool has_proxy_cfg = !cfg_snap.gemini_proxy_host.empty();
+-    bool cur_use_proxy = use_proxy_host_.load() && has_proxy_cfg;
++    // Ordered route candidates: every configured proxy first (in config order),
++    // direct as the last resort. The sticky flag decides what is tried first.
++    std::vector<std::string> proxy_hosts;
++    for (const std::string& h : cfg_snap.gemini_proxy_hosts) {
++        if (!h.empty()) proxy_hosts.push_back(h);
++    }
++    if (proxy_hosts.empty() && !cfg_snap.gemini_proxy_host.empty()) {
++        proxy_hosts.push_back(cfg_snap.gemini_proxy_host);
++    }
++    std::vector<std::string> route_hosts;
++    if (use_proxy_host_.load() && !proxy_hosts.empty()) {
++        route_hosts = proxy_hosts;
++        route_hosts.emplace_back();
++    } else {
++        route_hosts.emplace_back();
++        for (const auto& h : proxy_hosts) route_hosts.push_back(h);
++    }
++    size_t route_idx = 0;
++    auto route_host = [&]() -> const std::string& { return route_hosts[route_idx]; };
++    auto route_has_next = [&]() -> bool { return route_idx + 1 < route_hosts.size(); };
++    auto route_label = [&](const std::string& h) -> std::string {
++        return h.empty() ? std::string(kGeminiHost) : h;
++    };
++    auto advance_route = [&]() -> bool {
++        if (!route_has_next()) return false;
++        ++route_idx;
++        return true;
++    };
+     bool cur_google_search = cfg_snap.google_search && !search_quota_unsupported_.load();
+-    bool retried_route = false;
+     bool retried_search = false;
+ 
+     bool setup_complete = false;
+@@ -1345,19 +1374,17 @@ void AssistantManager::session_worker(uint64_t sid,
+         AssistantConfig eff_cfg = cfg_snap;
+         eff_cfg.google_search = cur_google_search;
+         const std::string setup_json_str = build_setup_json(eff_cfg).dump(-1);
+-        std::string connect_host = cur_use_proxy ? cfg_snap.gemini_proxy_host : "";
++        const std::string connect_host = route_host();
+         err.clear();
+         if (!ws.connect(kGeminiHost, kGeminiPort, ws_path, kCaBundlePath, err, 8000, connect_host)) {
+             if (session_abort_.load() || !running_.load()) {
+                 break;
+             }
+-            if (!retried_route && has_proxy_cfg) {
+-                retried_route = true;
+-                cur_use_proxy = !cur_use_proxy;
+-                LOGW("Assistant", "Gemini connect via '%s' failed (%s); retrying via '%s'",
+-                     connect_host.empty() ? kGeminiHost : connect_host.c_str(),
+-                     err.c_str(),
+-                     cur_use_proxy ? cfg_snap.gemini_proxy_host.c_str() : kGeminiHost);
++            if (route_has_next()) {
++                LOGW("Assistant", "Gemini connect via '%s' failed (%s); trying next route '%s'",
++                     route_label(connect_host).c_str(), err.c_str(),
++                     route_label(route_hosts[route_idx + 1]).c_str());
++                advance_route();
+                 continue;
+             }
+             set_error("Подключение к Gemini: " + err, src != TriggerSource::Text);
+@@ -1368,11 +1395,11 @@ void AssistantManager::session_worker(uint64_t sid,
+         // Send BidiGenerateContentSetup
+         if (!ws.send_text(setup_json_str)) {
+             ws.close();
+-            if (!session_abort_.load() && running_.load() && !retried_route && has_proxy_cfg) {
+-                retried_route = true;
+-                cur_use_proxy = !cur_use_proxy;
+-                LOGW("Assistant", "Failed to send Gemini setup; retrying via '%s'",
+-                     cur_use_proxy ? cfg_snap.gemini_proxy_host.c_str() : kGeminiHost);
++            if (!session_abort_.load() && running_.load() && route_has_next()) {
++                LOGW("Assistant", "Failed to send Gemini setup via '%s'; trying next route '%s'",
++                     route_label(route_host()).c_str(),
++                     route_label(route_hosts[route_idx + 1]).c_str());
++                advance_route();
+                 continue;
+             }
+             if (!session_abort_.load() && running_.load()) {
+@@ -1409,11 +1436,11 @@ void AssistantManager::session_worker(uint64_t sid,
+             if (const auto* e = msg.get("error"); e && e->is_obj()) {
+                 std::string em = "Gemini API error";
+                 if (const auto* m = e->get("message"); m && m->is_str()) em = m->as_str();
+-                if (!setup_complete && !retried_route && has_proxy_cfg &&
++                if (!setup_complete && route_has_next() &&
+                     (contains_ci(em, "location") || contains_ci(em, "region") ||
+                      contains_ci(em, "country") || contains_ci(em, "unavailable"))) {
+-                    LOGW("Assistant", "Pre-setup JSON error (%s); retrying via '%s'",
+-                         em.c_str(), !cur_use_proxy ? cfg_snap.gemini_proxy_host.c_str() : kGeminiHost);
++                    LOGW("Assistant", "Pre-setup JSON error (%s); trying next route '%s'",
++                         em.c_str(), route_label(route_hosts[route_idx + 1]).c_str());
+                     retry_alternate = true;
+                     return false;
+                 }
+@@ -1429,12 +1456,12 @@ void AssistantManager::session_worker(uint64_t sid,
+ 
+             if (msg.get("setupComplete")) {
+                 setup_complete = true;
+-                use_proxy_host_.store(cur_use_proxy);
++                use_proxy_host_.store(!route_host().empty());
+                 had_interaction = (src == TriggerSource::Text) || !pending_voice_greeting.empty();
+                 listen_idle_since = std::chrono::steady_clock::now();
+                 last_pcm_flush_tp = listen_idle_since;
+                 LOGI("Assistant", "Gemini Live setupComplete (via=%s, voice=%s)",
+-                     cur_use_proxy ? cfg_snap.gemini_proxy_host.c_str() : "direct",
++                     route_label(route_host()).c_str(),
+                      cfg_snap.voice_name.c_str());
+                 if (!pending_voice_greeting.empty()) {
+                     set_state(AssistantState::Thinking);
+@@ -1646,16 +1673,16 @@ void AssistantManager::session_worker(uint64_t sid,
+                     LOGI("Assistant", "Gemini WebSocket closed cleanly (code=%u, reason=%s)",
+                          frame.close_code, close_reason.c_str());
+                     bool can_fallback =
+-                        !setup_complete && !retried_route && has_proxy_cfg &&
++                        !setup_complete && route_has_next() &&
+                         !session_abort_.load() && running_.load() &&
+                         (frame.close_code == 1007 || frame.close_code == 1006 || frame.close_code == 0 ||
+                          contains_ci(close_reason, "location") || contains_ci(close_reason, "region") ||
+                          contains_ci(close_reason, "country"));
+                     if (can_fallback) {
+-                        LOGW("Assistant", "Pre-setup close (code=%u) via '%s'; retrying via '%s'",
++                        LOGW("Assistant", "Pre-setup close (code=%u) via '%s'; trying next route '%s'",
+                              frame.close_code,
+-                             cur_use_proxy ? cfg_snap.gemini_proxy_host.c_str() : kGeminiHost,
+-                             !cur_use_proxy ? cfg_snap.gemini_proxy_host.c_str() : kGeminiHost);
++                             route_label(route_host()).c_str(),
++                             route_label(route_hosts[route_idx + 1]).c_str());
+                         retry_alternate = true;
+                         break;
+                     }
+@@ -1681,9 +1708,10 @@ void AssistantManager::session_worker(uint64_t sid,
+                     break;
+                 }
+                 if (rst == WsRecvStatus::Error) {
+-                    if (!setup_complete && !retried_route && has_proxy_cfg && !session_abort_.load() && running_.load()) {
+-                        LOGW("Assistant", "Pre-setup WebSocket read error (%s); retrying via '%s'",
+-                             rerr.c_str(), !cur_use_proxy ? cfg_snap.gemini_proxy_host.c_str() : kGeminiHost);
++                    if (!setup_complete && route_has_next() && !session_abort_.load() && running_.load()) {
++                        LOGW("Assistant", "Pre-setup WebSocket read error (%s) via '%s'; trying next route '%s'",
++                             rerr.c_str(), route_label(route_host()).c_str(),
++                             route_label(route_hosts[route_idx + 1]).c_str());
+                         retry_alternate = true;
+                         break;
+                     }
+@@ -1701,10 +1729,10 @@ void AssistantManager::session_worker(uint64_t sid,
+ 
+             if (!setup_complete) {
+                 if (now >= setup_deadline_tp) {
+-                    if (!retried_route && has_proxy_cfg && running_.load() && !session_abort_.load()) {
+-                        LOGW("Assistant", "setupComplete timeout via '%s'; retrying via '%s'",
+-                             cur_use_proxy ? cfg_snap.gemini_proxy_host.c_str() : kGeminiHost,
+-                             !cur_use_proxy ? cfg_snap.gemini_proxy_host.c_str() : kGeminiHost);
++                    if (route_has_next() && running_.load() && !session_abort_.load()) {
++                        LOGW("Assistant", "setupComplete timeout via '%s'; trying next route '%s'",
++                             route_label(route_host()).c_str(),
++                             route_label(route_hosts[route_idx + 1]).c_str());
+                         retry_alternate = true;
+                     } else {
+                         set_error("Таймаут setupComplete от Gemini Live", src != TriggerSource::Text);
+@@ -1813,18 +1841,17 @@ void AssistantManager::session_worker(uint64_t sid,
+                 "[Системное событие] Голос ассистента только что переключён на " + cfg_snap.voice_name +
+                 ". Подтверди смену голоса пользователю 1–2 короткими фразами этим новым голосом.";
+             fatal_error = false;
+-            retried_route = false;
++            route_idx = 0;
+             continue;
+         }
+-        if (retry_alternate && !retried_route && has_proxy_cfg && running_.load() && !session_abort_.load()) {
++        if (retry_alternate && route_has_next() && running_.load() && !session_abort_.load()) {
+             ws.close();
+-            retried_route = true;
+-            cur_use_proxy = !cur_use_proxy;
++            advance_route();
+             continue;
+         }
+         if (retry_without_search && !retried_search && cur_google_search && running_.load() && !session_abort_.load()) {
+             ws.close();
+-            if (cur_use_proxy) use_proxy_host_.store(true);
++            if (!route_host().empty()) use_proxy_host_.store(true);
+             search_quota_unsupported_.store(true);
+             retried_search = true;
+             cur_google_search = false;
+@@ -1871,7 +1898,13 @@ json::Value AssistantManager::get_status_json() {
+     obj["model"] = Value::make_str(c.gemini_model);
+     obj["voiceName"] = Value::make_str(c.voice_name);
+     obj["proxyHost"] = Value::make_str(c.gemini_proxy_host);
+-    obj["proxyActive"] = Value::make_bool(use_proxy_host_.load() && !c.gemini_proxy_host.empty());
++    {
++        Value ph = Value::make_arr();
++        for (const auto& h : c.gemini_proxy_hosts) ph.push(Value::make_str(h));
++        obj["proxyHosts"] = std::move(ph);
++    }
++    obj["proxyActive"] = Value::make_bool(use_proxy_host_.load() &&
++                                          (!c.gemini_proxy_host.empty() || !c.gemini_proxy_hosts.empty()));
+     obj["hasApiKey"] = Value::make_bool(!c.gemini_api_key.empty());
+     obj["agentMode"] = Value::make_bool(c.agent_mode);
+ 
+diff --git a/daemon/src/config.cpp b/daemon/src/config.cpp
+index ee183e4..b8eae94 100644
+--- a/daemon/src/config.cpp
++++ b/daemon/src/config.cpp
+@@ -239,6 +239,25 @@ void DaemonConfig::sanitize_and_validate() {
+         }
+         assistant.gemini_proxy_host = std::move(clean_proxy);
+     }
++    {
++        std::vector<std::string> clean_hosts;
++        clean_hosts.reserve(assistant.gemini_proxy_hosts.size());
++        for (std::string h : assistant.gemini_proxy_hosts) {
++            std::string clean;
++            clean.reserve(h.size());
++            for (unsigned char uc : h) {
++                if (uc <= 0x20 || uc >= 0x7F) continue;
++                clean.push_back(static_cast<char>(uc));
++                if (clean.size() >= 128) break;
++            }
++            if (clean.empty()) continue;
++            if (std::find(clean_hosts.begin(), clean_hosts.end(), clean) == clean_hosts.end()) {
++                clean_hosts.push_back(std::move(clean));
++                if (clean_hosts.size() >= 8) break;
++            }
++        }
++        assistant.gemini_proxy_hosts = std::move(clean_hosts);
++    }
+     if (assistant.voice_name.empty() || assistant.voice_name.size() > 32) {
+         assistant.voice_name = "Aoede";
+     }
+@@ -379,6 +398,11 @@ json::Value DaemonConfig::to_json() const {
+     ast["geminiApiKey"] = Value::make_str(assistant.gemini_api_key);
+     ast["geminiModel"] = Value::make_str(assistant.gemini_model);
+     ast["geminiProxyHost"] = Value::make_str(assistant.gemini_proxy_host);
++    {
++        Value gh = Value::make_arr();
++        for (const auto& s : assistant.gemini_proxy_hosts) gh.push(Value::make_str(s));
++        ast["geminiProxyHosts"] = std::move(gh);
++    }
+     ast["voiceName"] = Value::make_str(assistant.voice_name);
+     ast["systemPrompt"] = Value::make_str(assistant.system_prompt);
+     ast["wakeWordEnabled"] = Value::make_bool(assistant.wake_word_enabled);
+@@ -549,6 +573,12 @@ void DaemonConfig::from_json(const json::Value& v) {
+         if (auto* x = ast->get("geminiApiKey"); x && x->is_str()) assistant.gemini_api_key = x->as_str();
+         if (auto* x = ast->get("geminiModel"); x && x->is_str()) assistant.gemini_model = x->as_str();
+         if (auto* x = ast->get("geminiProxyHost"); x && x->is_str()) assistant.gemini_proxy_host = x->as_str();
++        if (auto* gh = ast->get("geminiProxyHosts"); gh && gh->is_arr()) {
++            assistant.gemini_proxy_hosts.clear();
++            for (const auto& item : gh->arr_val) {
++                if (item.is_str()) assistant.gemini_proxy_hosts.push_back(item.as_str());
++            }
++        }
+         if (auto* x = ast->get("voiceName"); x && x->is_str()) assistant.voice_name = x->as_str();
+         if (auto* x = ast->get("systemPrompt"); x && x->is_str()) assistant.system_prompt = x->as_str();
+         if (auto* x = ast->get("wakeWordEnabled"); x && x->is_bool()) assistant.wake_word_enabled = x->as_bool();
+diff --git a/daemon/src/config.hpp b/daemon/src/config.hpp
+index 98cd22c..7ffd967 100644
+--- a/daemon/src/config.hpp
++++ b/daemon/src/config.hpp
+@@ -90,6 +90,7 @@ struct AssistantConfig {
+     std::string gemini_api_key;
+     std::string gemini_model = "gemini-3.8-live";
+     std::string gemini_proxy_host = "ai-pool.comss.one"; // SNI proxy fallback on geo-block (1007)
++    std::vector<std::string> gemini_proxy_hosts;          // ordered proxy candidates, direct route last
+     std::string voice_name = "Aoede";
+     std::string system_prompt =
+         "Ты — девушка, голосовая помощница Алиса на умной колонке Яндекс Станция Макс с открытой прошивкой OpenStation Max (полный root-доступ и живой доступ в интернет). "
+diff --git a/daemon/src/main.cpp b/daemon/src/main.cpp
+index a345dd9..5055aa8 100644
+--- a/daemon/src/main.cpp
++++ b/daemon/src/main.cpp
+@@ -1146,6 +1146,10 @@ int main(int argc, char** argv) {
+     TimerManager timers;
+     WyomingServer wyoming;
+     MdnsResponder mdns;
++    // SberPortal: adbd/root is managed by the external boot starter. The daemon
++    // must never restart adbd here, otherwise it drops the localhost adb shell
++    // connection that keeps openstationd alive.
++    constexpr bool kManageAdb = false;
+     AdbManager adb_mgr;
+     MqttClient mqtt;
+     OtaManager ota;
+@@ -1517,7 +1521,7 @@ int main(int argc, char** argv) {
+         assistant.set_mic_sensitivity(c.audio.mic_sensitivity);
+         wyoming.update_config(c.wyoming);
+         mdns.update_hostname(c.device_hostname);
+-        adb_mgr.update_config(c.network, c.device_hostname);
++        if (kManageAdb) adb_mgr.update_config(c.network, c.device_hostname);
+         mqtt.update_config(c.mqtt);
+         ota.update_config(c.ota);
+ 
+@@ -3449,9 +3453,11 @@ int main(int argc, char** argv) {
+     });
+ 
+     mdns.start(cfg.device_hostname, cfg.web_port, cfg.wyoming.port);
+-    adb_mgr.start(cfg.network, cfg.device_hostname, [&](int adb_port) {
+-        mdns.update_adb_port(adb_port);
+-    });
++    if (kManageAdb) {
++        adb_mgr.start(cfg.network, cfg.device_hostname, [&](int adb_port) {
++            mdns.update_adb_port(adb_port);
++        });
++    }
+ 
+     mqtt.start(cfg.mqtt, [&](const std::string& topic_suffix, const std::string& payload) {
+         DaemonConfig next_c;
+@@ -3979,6 +3985,14 @@ int main(int argc, char** argv) {
+                     if (const auto* p = v.get("geminiProxyHost"); p && p->is_str()) {
+                         proxy = p->as_str();
+                     }
++                    if (const auto* ph = v.get("geminiProxyHosts"); ph && ph->is_arr()) {
++                        for (const auto& item : ph->arr_val) {
++                            if (item.is_str() && !trim_ws_copy(item.as_str()).empty()) {
++                                proxy = item.as_str();
++                                break;
++                            }
++                        }
++                    }
+                 }
+                 json::Value pr = probe_gemini_live_json(key, model, proxy);
+                 return HttpResponse::json(pr.dump(-1), 200);
+@@ -4162,12 +4176,12 @@ int main(int argc, char** argv) {
+                 }
+ 
+                 if (cfg_dirty) {
+-                    adb_mgr.update_config(c.network, c.device_hostname);
++                    if (kManageAdb) adb_mgr.update_config(c.network, c.device_hostname);
+                     save_cfg(c);
+                 }
+ 
+                 bool force_restart = (action == "restart");
+-                bool ok = adb_mgr.repair_now("webui_" + action, force_restart);
++                bool ok = kManageAdb ? adb_mgr.repair_now("webui_" + action, force_restart) : true;
+                 json::Value st = build_status_json();
+                 st["ok"] = json::Value::make_bool(ok);
+                 std::string out = st.dump(-1);

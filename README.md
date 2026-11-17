@@ -1,0 +1,128 @@
+# OpenStation для SberPortal
+
+Форк [OPENSTATION](https://github.com/Olegu621/OPENSTATION) под смарт-экран **SberPortal**
+(Amlogic A311D «stargate», Android 9, userspace `armeabi-v7a`).
+
+Цель — сохранить работоспособные части OpenStation (Gemini Live-ассистент, музыка, лаунчер)
+и убрать всё, чего в портале физически нет: LED-кольцо, LED-матрицу, энкодер,
+кнопки Action/Mute, HDMI-CEC, усилители SY6045S/ES8156.
+
+Оригинальные Sber-сервисы, root и boot-loader не затрагиваются — откат на сток/Центавр
+описан ниже.
+
+## Что лежит в репозитории
+
+| путь | содержимое |
+| --- | --- |
+| `launcher/` | форк лаунчера OpenStation (Kotlin, Gradle 8.6 / JDK 17) |
+| `bootstarter/` | форк bootstarter (Java): `wm density`, запуск демона, watcher |
+| `daemon/patches/` | патч демона `openstationd`: список прокси-хостов с перебором |
+| `scripts/` | сборка и установка без ручных команд |
+| `OpenStation-SberPortal.apk` | собранный и подписанный debug-ключом лаунчер |
+
+Сам демон — upstream-код, патч применяется поверх `Olegu621/OPENSTATION` (см. `daemon/README.md`).
+Библиотеки `sherpa-onnx` и `onnxruntime` под `armeabi-v7a` берутся из upstream-релизов.
+
+## Что изменено относительно upstream
+
+**Лаунчер**
+
+- Экран «Станция»: убраны плитки «Кольцо», «Визуал», «ТВ (CEC)»; остались «Мик», «Выход», «EQ»,
+  EQ занимает всю нижнюю строку, фокус страницы — на «Мик».
+- «Музыка и ТВ» → «Музыка и видео», «Настройки Android TV» → «Настройки системы»,
+  «Настройки TV» → «Настройки Android».
+- Карточка станции показывает орб Алисы вместо рендера колонки Station Max.
+- Мастер настройки: шаг 4 переделан в «Звук и микрофон» (микрофон, громкость, тест-тон,
+  стартовое шоу) вместо LED/матрицы/CEC; из выходов звука убран HDMI.
+- Пресеты промпта переписаны без обещаний LED, матрицы и HDMI-CEC.
+- Брендинг `OpenStation Max` → `OpenStation`, hostname `sberportal`, BLE-имя `OpenStation`.
+
+**Демон**
+
+- `assistant.geminiProxyHosts` — упорядоченный список прокси-хостов с автоматическим
+  перебором; прямой маршрут всегда последний. Подробности — `daemon/README.md`.
+
+**Bootstarter**
+
+- При загрузке выставляет `wm density 216` (эквивалент эталонной сетки лаунчера)
+  и запускает `/data/local/openstation/openstationd` с нужным `LD_LIBRARY_PATH`.
+
+## Сборка
+
+```sh
+# лаунчер (нужны JDK 17, Android SDK, Gradle 8.6)
+JAVA_HOME=/path/to/jdk17 ANDROID_HOME=/path/to/android-sdk ./scripts/build-launcher.sh
+
+# демон (нужен Android NDK 27.x)
+ANDROID_NDK=/path/to/ndk ./scripts/build-daemon.sh
+```
+
+## Установка
+
+ADB к порталу обычно доступен только по сети, поэтому удобно поднять SSH-туннель
+на машину, которая видит портал в LAN:
+
+```sh
+ssh -f -N -L 15555:<PORTAL_IP>:5555 <user>@<LAN_HOST>
+ADB_SERIAL=127.0.0.1:15555 ./scripts/install-launcher.sh OpenStation-SberPortal.apk
+```
+
+После каждого `install -r` Android сбрасывает домашнее приложение — скрипт заново
+выставляет `com.openstation.launcher/.MainActivity` как HOME.
+
+Скриншоты на портале снимаются только через `screenrecord`: `screencap` отдаёт
+портретный фреймбуфер (800×2560).
+
+```sh
+adb -s "$ADB_SERIAL" shell 'screenrecord --time-limit 3 --size 1280x800 /data/local/tmp/s.mp4'
+adb -s "$ADB_SERIAL" pull /data/local/tmp/s.mp4 .
+ffmpeg -y -sseof -0.2 -i s.mp4 -frames:v 1 shot.png
+```
+
+## Ассистент и прокси
+
+Gemini Live недоступен из РФ (`1007 User location is not supported`), поэтому демон
+умеет ходить к `generativelanguage.googleapis.com` через сторонний TCP/SNI-прокси:
+TLS-сессия и проверка сертификата остаются сквозными, меняется только IP назначения.
+
+Настройка (в веб-пульте `/api/config` или в мастере на устройстве):
+
+```json
+{
+  "assistant": {
+    "geminiProxyHost": "ai-pool.comss.one",
+    "geminiProxyHosts": ["ai-pool.comss.one", "203.0.113.10"]
+  }
+}
+```
+
+- `geminiProxyHost` — основной хост (совместимость с upstream и веб-пультом).
+- `geminiProxyHosts` — необязательный список кандидатов; если задан, используется он,
+  а `geminiProxyHost` служит запасным одиночным значением.
+- Порядок попыток: успешный в прошлой сессии маршрут первым, затем остальные прокси,
+  последним — прямое подключение.
+- Перебор срабатывает на ошибке TCP/TLS, ошибке `setup`-обмена, ответах про
+  `location`/`region`/`country`, кодах закрытия `1006`/`1007` и таймауте `setupComplete`.
+
+`Private DNS` (DoT, порт 853) в этой схеме не нужен: он не лечит геоблок по IP,
+а при недоступном 853 в strict-режиме Android 9 теряет вообще весь DNS.
+Оставляйте `private_dns_mode = off`.
+
+Сторонние бесплатные SNI-прокси нестабильны: конкретный узел может перестать
+отвечать на Google-SNI (DPI или лимиты), поэтому список кандидатов и прямой маршрут
+в конце — не роскошь, а необходимость.
+
+## Откат
+
+```sh
+adb -s "$ADB_SERIAL" shell pm enable ru.yandex.quasar.centaur_app
+adb -s "$ADB_SERIAL" shell cmd package set-home-activity com.ravn.homeproxy/.HomeActivity
+adb -s "$ADB_SERIAL" shell wm density reset
+# затем вернуть оригинальный RavnBootStarter.apk и перезагрузить портал
+```
+
+## Лицензия
+
+Код лаунчера, демона и bootstarter — производная от [OPENSTATION](https://github.com/Olegu621/OPENSTATION);
+условия распространения наследуются от upstream. Изменения этого форка распространяются
+на тех же условиях.
