@@ -7,8 +7,8 @@
 и убрать всё, чего в портале физически нет: LED-кольцо, LED-матрицу, энкодер,
 кнопки Action/Mute, HDMI-CEC, усилители SY6045S/ES8156.
 
-Оригинальные Sber-сервисы, root и boot-loader не затрагиваются — откат на сток/Центавр
-описан ниже.
+Оригинальные Sber-сервисы, root и boot-loader не затрагиваются — как вернуть штатный
+интерфейс Sber, описано ниже.
 
 ## Что лежит в репозитории
 
@@ -195,20 +195,28 @@ TLS-сессия и проверка сертификата остаются с�
 
 ## YouTube
 
-YouTube включён через тот же приём, что использовался на Centaur: туннель StarTube
-(TLS-PSK к прокси Сбера) плюс локальный HTTP-прокси, который пускает через этот
-туннель только YouTube и Google, а весь остальной трафик — напрямую. SmartTube
-работает: лента, поиск, воспроизведение. Подробности, установка и откат —
-`scripts/youtube/README.md`.
+YouTube идёт через туннель StarTube (TLS-PSK к прокси Сбера) плюс локальный
+HTTP-прокси, который пускает через этот туннель только YouTube и Google, а весь
+остальной трафик — напрямую. SmartTube работает: лента, поиск, воспроизведение.
+Подробности, установка и откат — `scripts/youtube/README.md`.
 
-## Откат
+## Откат к штатному интерфейсу Sber
+
+Штатные Sber-сервисы, root и загрузчик не затрагиваются: OpenStation работает
+поверх них, своим лаунчером и своим демоном. Поэтому откат — это вернуть домашнюю
+активность Sber, плотность экрана и оригинальный bootstarter:
 
 ```sh
-adb -s "$ADB_SERIAL" shell pm enable ru.yandex.quasar.centaur_app
-adb -s "$ADB_SERIAL" shell cmd package set-home-activity com.ravn.homeproxy/.HomeActivity
+adb -s "$ADB_SERIAL" shell cmd package set-home-activity ru.sberdevices.starlauncher/.ui.mainscreen.MainActivity
 adb -s "$ADB_SERIAL" shell wm density reset
-# затем вернуть оригинальный RavnBootStarter.apk и перезагрузить портал
+adb -s "$ADB_SERIAL" shell pm uninstall com.openstation.launcher
+# затем вернуть оригинальный RavnBootStarter.apk без `wm density` и запуска openstationd
+# и перезагрузить портал
 ```
+
+Файлы на портале, которые можно удалить после отката:
+`/data/local/openstation/` (демон, модели, конфиг) и `/data/local/openstation/yt`
+(туннель YouTube).
 
 ## Лицензия
 
