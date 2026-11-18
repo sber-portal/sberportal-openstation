@@ -361,6 +361,8 @@ int main(int argc, char **argv) {
     if (argc > 2) g_socks_port = atoi(argv[2]);
     if (argc > 3) g_log = atoi(argv[3]) != 0;
     signal(SIGPIPE, SIG_IGN);
+    /* One child per connection; without this they pile up as zombies. */
+    signal(SIGCHLD, SIG_IGN);
 
     int srv = socket(AF_INET, SOCK_STREAM, 0);
     if (srv < 0) { perror("socket"); return 1; }
