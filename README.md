@@ -19,6 +19,7 @@
 | `daemon/patches/` | патч демона `openstationd`: перебор прокси-хостов, голосовой запуск Кинопоиска, чистка веб-пульта |
 | `scripts/` | сборка и установка без ручных команд |
 | `scripts/youtube/` | обход блокировки YouTube: туннель StarTube + локальный HTTP-прокси (`ytproxy.c`) |
+| `scripts/boot/sber_guard.sh` | boot-хелпер: ZeroTier, блок OTA, живучесть YouTube-туннеля |
 | `OpenStation-SberPortal.apk` | собранный и подписанный debug-ключом лаунчер |
 | `docs/decisions.md` | лог принятых решений (ADR) |
 
