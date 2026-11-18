@@ -18,6 +18,7 @@
 | `bootstarter/` | форк bootstarter (Java): `wm density`, запуск демона, watcher |
 | `daemon/patches/` | патч демона `openstationd`: перебор прокси-хостов, голосовой запуск Кинопоиска, чистка веб-пульта |
 | `scripts/` | сборка и установка без ручных команд |
+| `scripts/youtube/` | обход блокировки YouTube: туннель StarTube + локальный HTTP-прокси (`ytproxy.c`) |
 | `OpenStation-SberPortal.apk` | собранный и подписанный debug-ключом лаунчер |
 
 Сам демон — upstream-код, патч применяется поверх `Olegu621/OPENSTATION` (см. `daemon/README.md`).
@@ -191,6 +192,14 @@ TLS-сессия и проверка сертификата остаются с�
 Для записи яркости лаунчеру нужно разрешение `WRITE_SETTINGS`; `scripts/install-launcher.sh`
 выдаёт appop (`appops set com.openstation.launcher WRITE_SETTINGS allow`). Без него
 яркость меняется только у окна лаунчера.
+
+## YouTube
+
+YouTube включён через тот же приём, что использовался на Centaur: туннель StarTube
+(TLS-PSK к прокси Сбера) плюс локальный HTTP-прокси, который пускает через этот
+туннель только YouTube и Google, а весь остальной трафик — напрямую. SmartTube
+работает: лента, поиск, воспроизведение. Подробности, установка и откат —
+`scripts/youtube/README.md`.
 
 ## Откат
 
