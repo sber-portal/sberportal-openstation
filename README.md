@@ -20,6 +20,7 @@
 | `scripts/` | сборка и установка без ручных команд |
 | `scripts/youtube/` | обход блокировки YouTube: туннель StarTube + локальный HTTP-прокси (`ytproxy.c`) |
 | `OpenStation-SberPortal.apk` | собранный и подписанный debug-ключом лаунчер |
+| `docs/decisions.md` | лог принятых решений (ADR) |
 
 Сам демон — upstream-код, патч применяется поверх `Olegu621/OPENSTATION` (см. `daemon/README.md`).
 Библиотеки `sherpa-onnx` и `onnxruntime` под `armeabi-v7a` берутся из upstream-релизов.
@@ -39,6 +40,8 @@
 - Брендинг `OpenStation Max` → `OpenStation`, hostname `sberportal`, BLE-имя `OpenStation`.
 - Автояркость по датчику света, ночной режим (минимум яркости и одни часы на экране)
   и крупные часы вместо дашборда после бездействия (см. раздел «Экран»).
+- Адрес веб-пульта в QR — с интерфейса маршрута по умолчанию, а не с ZeroTier/VPN
+  (см. `docs/decisions.md`).
 
 **Демон**
 
